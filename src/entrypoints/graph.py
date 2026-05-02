@@ -3,6 +3,7 @@
 from loguru import logger
 
 from src.domain.entities import ExecutionState
+from src.infrastructure.llm.agents import CoderAgent, PlannerAgent
 from src.infrastructure.llm.factory import create_llm_provider
 
 
@@ -20,11 +21,20 @@ class InputNode:
 class PlannerNode:
     """Decompose task into subtasks"""
 
+    def __init__(self) -> None:
+        self.agent = PlannerAgent(create_llm_provider())
+
     async def execute(self, state: ExecutionState) -> ExecutionState:
         """Execute planning"""
         logger.info(f"PlannerNode: Planning task {state.task_id}")
-        state.current_node = "CoderNode"
-        state.plan = ["step_1", "step_2", "step_3"]
+        try:
+            result = await self.agent.run(state.parsed_intent)
+            state.plan = result.steps
+            state.current_node = "CoderNode"
+            logger.info(f"PlannerNode: Plan created with {len(result.steps)} steps")
+        except Exception as e:
+            logger.error(f"PlannerNode: Planning failed: {e}")
+            state.current_node = "ErrorNode"
         return state
 
 
@@ -32,15 +42,19 @@ class CoderNode:
     """Generate code for tool"""
 
     def __init__(self) -> None:
-        """Initialize with LLM provider"""
-        self.llm = create_llm_provider()
+        self.agent = CoderAgent(create_llm_provider())
 
     async def execute(self, state: ExecutionState) -> ExecutionState:
         """Execute code generation"""
         logger.info(f"CoderNode: Generating code for task {state.task_id}")
-        state.current_node = "ValidationNode"
-        spec = "\n".join(state.plan)
-        state.generated_code = await self.llm.generate_code(spec)
+        try:
+            result = await self.agent.run(state.plan)
+            state.generated_code = result.code
+            state.current_node = "ValidationNode"
+            logger.info(f"CoderNode: Code generated ({len(result.code)} chars)")
+        except Exception as e:
+            logger.error(f"CoderNode: Code generation failed: {e}")
+            state.current_node = "ErrorNode"
         return state
 
 
@@ -55,13 +69,17 @@ class ValidationNode:
 
 
 class ApprovalNode:
-    """Wait for human approval"""
+    """Wait for human approval — pauses graph execution"""
 
     async def execute(self, state: ExecutionState) -> ExecutionState:
-        """Execute approval"""
-        logger.info(f"ApprovalNode: Waiting approval for task {state.task_id}")
+        """Set requires_approval flag and fill approval data"""
+        logger.info(f"ApprovalNode: Requesting approval for task {state.task_id}")
         state.requires_approval = True
-        state.current_node = "ExecutorNode"
+        state.approval_data = {
+            "code": state.generated_code,
+            "plan": state.plan,
+        }
+        # Keep current_node as ApprovalNode — signals graph to pause
         return state
 
 
@@ -94,29 +112,10 @@ class ErrorNode:
         return state
 
 
-# Graph nodes registry (lazy initialization)
-_GRAPH_NODES: dict | None = None
-
-
-def get_graph_nodes() -> dict:
-    """Get graph nodes (lazy initialization)"""
-    global _GRAPH_NODES
-    if _GRAPH_NODES is None:
-        _GRAPH_NODES = {
-            "InputNode": InputNode(),
-            "PlannerNode": PlannerNode(),
-            "CoderNode": CoderNode(),
-            "ValidationNode": ValidationNode(),
-            "ApprovalNode": ApprovalNode(),
-            "ExecutorNode": ExecutorNode(),
-            "CompletionNode": CompletionNode(),
-            "ErrorNode": ErrorNode(),
-        }
-    return _GRAPH_NODES
-
-
 async def execute_graph(state: ExecutionState) -> ExecutionState:
-    """Execute graph with state"""
+    """Execute graph with state; pauses when requires_approval is set."""
+    from src.entrypoints.graph_nodes import get_graph_nodes
+
     max_iterations = 10
     iteration = 0
     nodes = get_graph_nodes()
@@ -131,6 +130,11 @@ async def execute_graph(state: ExecutionState) -> ExecutionState:
 
         node = nodes[node_name]
         state = await node.execute(state)
+
+        # Pause graph when human approval is required
+        if state.requires_approval:
+            logger.info(f"Graph paused at ApprovalNode for task {state.task_id}")
+            return state
 
         if node_name in {"CompletionNode", "ErrorNode"}:
             break

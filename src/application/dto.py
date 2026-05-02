@@ -39,3 +39,32 @@ class ExecutionDTO(BaseModel):
     error: str | None
     duration_ms: int
     created_at: datetime
+
+
+class PlanResult(BaseModel):
+    """Result of planning phase"""
+
+    steps: list[str]
+    reasoning: str
+    estimated_complexity: str
+
+
+class CodeResult(BaseModel):
+    """Result of code generation phase"""
+
+    code: str
+    explanation: str
+    dependencies: list[str]
+
+
+class ApprovalDTO(BaseModel):
+    """Approval data transfer object for human-in-the-loop"""
+
+    id: str
+    task_id: str
+    action_type: str
+    action_data: str
+    status: str
+    user_id: int
+    created_at: datetime
+    approved_at: datetime | None = None

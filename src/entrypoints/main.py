@@ -8,7 +8,7 @@ from loguru import logger
 
 from src.infrastructure.db.session import init_db
 from src.infrastructure.logging.config import setup_logging
-from src.entrypoints.telegram_bot import start_bot
+from src.entrypoints.telegram import start_bot
 
 load_dotenv()
 
